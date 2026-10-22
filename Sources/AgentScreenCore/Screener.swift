@@ -11,8 +11,14 @@ public final class Screener {
     public var log: FlagLog
     public var session: URLSession
     public var onFlag: ((Flag) -> Void)?
-    /// Called after each scoring call with nil on success or a short error.
-    public var onStatus: ((String?) -> Void)?
+    /// Called after each call to Security-One.
+    public var onCheck: ((Check) -> Void)?
+
+    public enum Check: Equatable {
+        /// The round trip to Superagent, in seconds.
+        case scored(seconds: Double)
+        case failed(String)
+    }
 
     // Claude Code resends the whole conversation every turn, so each result is scored once.
     private var seen = Set<String>()
@@ -37,7 +43,9 @@ public final class Screener {
 
             do {
                 for chunk in Self.chunks(of: result.text) {
+                    let start = Date()
                     let score = try await client.injectionProbability(of: String(chunk))
+                    onCheck?(.scored(seconds: Date().timeIntervalSince(start)))
                     if score >= SecurityOne.threshold {
                         let flag = Flag(time: Date(), score: score, tool: result.tool, source: result.source,
                                         session: request.header("X-Claude-Code-Session-Id"), excerpt: String(chunk.prefix(500)))
@@ -46,11 +54,10 @@ public final class Screener {
                         break
                     }
                 }
-                onStatus?(nil)
             } catch {
                 // Forget it so the next turn, which resends it, tries again.
                 _ = lock.withLock { seen.remove(hash) }
-                onStatus?("\(error)")
+                onCheck?(.failed("\(error)"))
             }
         }
     }
