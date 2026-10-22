@@ -30,9 +30,9 @@ Tool results that carry text from outside the machine:
 
 - `WebFetch` and `WebSearch`
 - MCP tools (`mcp__*`)
-- `Bash` commands that run `gh`, `multica`, `curl`, `wget`, or `git`
+- `Bash` commands that run `gh`, `multica`, `curl`, or `wget`
 
-It skips everything else, such as `Read` and `Skill`: their text is local, or instructions by design.
+It skips everything else, such as `Read`, `Skill`, and `git`: their text is local, or instructions by design. Skipped results never leave the machine.
 
 Claude Code resends the whole conversation every turn. The app scores each result once per run. It splits results over 60,000 characters into chunks and scores each chunk.
 
@@ -52,4 +52,4 @@ The app never logs headers. The agent's OAuth token passes through it, so it lis
 swift test
 ```
 
-The tests stub both upstreams. They cover request parsing, passthrough of streamed replies, which tool results are screened, the threshold, and retry after a failed score.
+The tests stub both upstreams. They cover request parsing, passthrough of streamed replies, cancelling upstream when the client hangs up, which tool results are screened, the threshold, and retry after a failed score.

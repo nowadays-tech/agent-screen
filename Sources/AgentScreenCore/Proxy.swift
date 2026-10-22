@@ -38,13 +38,14 @@ public final class Proxy {
 
     public func stop() { listener.cancel() }
 
-    fileprivate func forward(_ request: HTTPRequest, to client: ClientConnection) {
+    fileprivate func forward(_ request: HTTPRequest, to client: ClientConnection) -> URLSessionDataTask? {
         onRequest?(request)
-        forwarder.forward(request, upstream: upstream, to: client)
+        return forwarder.forward(request, upstream: upstream, to: client)
     }
 }
 
-/// One client socket. Reads requests one at a time and writes each reply with chunked framing.
+/// One client socket. Serves requests one at a time and writes each reply with chunked framing.
+/// A read stays pending the whole time, so a client that hangs up mid-reply cancels the upstream request.
 private final class ClientConnection {
     private let connection: NWConnection
     private let proxy: Proxy
@@ -53,6 +54,8 @@ private final class ClientConnection {
     private var keepAlive = true
     private var bodyless = false
     private var headSent = false
+    private var upstreamTask: URLSessionDataTask?
+    private var closed = false
 
     init(connection: NWConnection, proxy: Proxy) {
         self.connection = connection
@@ -66,21 +69,33 @@ private final class ClientConnection {
 
     private func receive() {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 1 << 20) { [self] data, _, isComplete, error in
+            guard !closed else { return }
             if let data { buffer.append(data) }
-            switch HTTPRequest.parse(buffer) {
-            case .request(let request, let consumed):
-                buffer = buffer.subdata(in: consumed..<buffer.count)
-                keepAlive = request.header("Connection")?.lowercased() != "close"
-                bodyless = request.method == "HEAD"
-                headSent = false
-                proxy.forward(request, to: self)
-            case .incomplete where isComplete || error != nil:
+            if isComplete || error != nil {
+                // The client hung up. Stop the model from generating a reply nobody reads.
+                upstreamTask?.cancel()
+                closed = true
                 connection.cancel()
-            case .incomplete:
-                receive()
-            case .invalid:
-                close(after: Data("HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".utf8))
+                return
             }
+            serveNext()
+            receive()
+        }
+    }
+
+    private func serveNext() {
+        guard upstreamTask == nil, !closed else { return }
+        switch HTTPRequest.parse(buffer) {
+        case .request(let request, let consumed):
+            buffer = buffer.subdata(in: consumed..<buffer.count)
+            keepAlive = request.header("Connection")?.lowercased() != "close"
+            bodyless = request.method == "HEAD"
+            headSent = false
+            upstreamTask = proxy.forward(request, to: self)
+        case .incomplete:
+            break
+        case .invalid:
+            close(after: Data("HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".utf8))
         }
     }
 
@@ -116,19 +131,22 @@ private final class ClientConnection {
 
     func finish(error: Error?) {
         queue.async { [self] in
+            upstreamTask = nil
+            guard !closed else { return }
             if error != nil && !headSent {
                 close(after: Data("HTTP/1.1 502 Bad Gateway\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".utf8))
                 return
             }
             if error != nil {
                 // The reply was cut off midway; a clean terminator would hide that.
+                closed = true
                 connection.cancel()
                 return
             }
             let end = bodyless ? Data() : Data("0\r\n\r\n".utf8)
             if keepAlive {
                 write(end)
-                receive()
+                serveNext()
             } else {
                 close(after: end)
             }
@@ -141,6 +159,7 @@ private final class ClientConnection {
 
     // A cancel right after a send can drop the bytes, so cancel once they are out.
     private func close(after data: Data) {
+        closed = true
         connection.send(content: data, contentContext: .finalMessage, isComplete: true, completion: .contentProcessed { [connection] _ in
             connection.cancel()
         })
@@ -162,10 +181,10 @@ private final class Forwarder: NSObject, URLSessionDataDelegate {
         session = URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
     }
 
-    func forward(_ request: HTTPRequest, upstream: URL, to client: ClientConnection) {
+    func forward(_ request: HTTPRequest, upstream: URL, to client: ClientConnection) -> URLSessionDataTask? {
         guard let url = URL(string: upstream.absoluteString + request.target) else {
             client.finish(error: URLError(.badURL))
-            return
+            return nil
         }
         var upstreamRequest = URLRequest(url: url)
         upstreamRequest.httpMethod = request.method
@@ -177,6 +196,7 @@ private final class Forwarder: NSObject, URLSessionDataDelegate {
         let task = session.dataTask(with: upstreamRequest)
         lock.withLock { clients[task.taskIdentifier] = client }
         task.resume()
+        return task
     }
 
     private func client(for task: URLSessionTask) -> ClientConnection? {

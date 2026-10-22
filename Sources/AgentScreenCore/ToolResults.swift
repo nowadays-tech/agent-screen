@@ -9,7 +9,8 @@ public struct ToolResult: Equatable {
 
 public enum ToolResults {
     /// Bash output counts as outside text only when the command talks to GitHub, Multica, or the web.
-    private static let outsideCommand = try! NSRegularExpression(pattern: #"(^|[\s;&|(])(gh|multica|curl|wget|git)\s"#)
+    /// Not `git`: most of its output is local code, which should not leave the machine.
+    private static let outsideCommand = try! NSRegularExpression(pattern: #"(^|[\s;&|(])(gh|multica|curl|wget)\s"#)
 
     /// Pulls the screenable tool results out of an Anthropic Messages API request body.
     /// Screened: WebFetch, WebSearch, MCP tools, and Bash commands that reach outside the machine.

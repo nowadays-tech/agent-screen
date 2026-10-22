@@ -1,4 +1,5 @@
 import Foundation
+import Network
 import Testing
 @testable import AgentScreenCore
 
@@ -9,10 +10,15 @@ final class Stub: URLProtocol {
         var headers: [String: String] = [:]
         var chunks: [Data] = []
         var error: Error?
+        /// Pause before each chunk, to stand in for a model that is still generating.
+        var delay: TimeInterval = 0
     }
 
     nonisolated(unsafe) static var handlers: [String: (URLRequest, Data) -> Reply] = [:]
     nonisolated(unsafe) static var seen: [(URLRequest, Data)] = []
+    nonisolated(unsafe) static var stopped = 0
+    nonisolated(unsafe) static var chunksSent = 0
+    private var cancelled = false
 
     static var configuration: URLSessionConfiguration {
         let configuration = URLSessionConfiguration.ephemeral
@@ -22,7 +28,10 @@ final class Stub: URLProtocol {
 
     override class func canInit(with request: URLRequest) -> Bool { handlers[request.url?.host ?? ""] != nil }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
-    override func stopLoading() {}
+    override func stopLoading() {
+        cancelled = true
+        Stub.stopped += 1
+    }
 
     override func startLoading() {
         var body = request.httpBody ?? Data()
@@ -44,8 +53,25 @@ final class Stub: URLProtocol {
         }
         let response = HTTPURLResponse(url: request.url!, statusCode: reply.status, httpVersion: "HTTP/1.1", headerFields: reply.headers)!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-        for chunk in reply.chunks { client?.urlProtocol(self, didLoad: chunk) }
-        client?.urlProtocolDidFinishLoading(self)
+        guard reply.delay > 0 else {
+            for chunk in reply.chunks { client?.urlProtocol(self, didLoad: chunk) }
+            client?.urlProtocolDidFinishLoading(self)
+            return
+        }
+        send(reply.chunks[...], every: reply.delay)
+    }
+
+    private func send(_ chunks: ArraySlice<Data>, every delay: TimeInterval) {
+        DispatchQueue.global().asyncAfter(deadline: .now() + delay) { [self] in
+            guard !cancelled else { return }
+            guard let chunk = chunks.first else {
+                client?.urlProtocolDidFinishLoading(self)
+                return
+            }
+            Stub.chunksSent += 1
+            client?.urlProtocol(self, didLoad: chunk)
+            send(chunks.dropFirst(), every: delay)
+        }
     }
 }
 
@@ -74,6 +100,8 @@ let conversation = messagesBody([
     toolResult("3", injection),
     toolUse("4", "Bash", ["command": "ls -la"]),
     toolResult("4", injection),
+    toolUse("6", "Bash", ["command": "git diff && git log -p"]),
+    toolResult("6", injection),
     toolUse("5", "Skill", ["skill": "coding"]),
     toolResult("5", injection),
 ])
@@ -83,6 +111,8 @@ struct AgentScreenCoreTests {
     init() {
         Stub.handlers = [:]
         Stub.seen = []
+        Stub.stopped = 0
+        Stub.chunksSent = 0
     }
 
     // MARK: Request parsing
@@ -166,6 +196,28 @@ struct AgentScreenCoreTests {
         #expect(upstreamRequest.value(forHTTPHeaderField: "Authorization") == "Bearer secret")
         #expect(upstreamBody == conversation)
         #expect(handedOver?.body == conversation)
+    }
+
+    @Test func cancelsUpstreamWhenTheClientHangsUp() async throws {
+        Stub.handlers["upstream.test"] = { _, _ in
+            Stub.Reply(headers: ["Content-Type": "text/event-stream"], chunks: Array(repeating: Data("data: x\n\n".utf8), count: 20), delay: 0.1)
+        }
+        let (proxy, base) = try await startProxy()
+        defer { proxy.stop() }
+
+        // A raw socket, so the test controls exactly when the client goes away.
+        let client = NWConnection(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: UInt16(base.port!))!, using: .tcp)
+        client.start(queue: .global())
+        client.send(content: Data("POST /v1/messages HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\n\r\n{}".utf8), completion: .idempotent)
+        let first: Data? = await withCheckedContinuation { continuation in
+            client.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { data, _, _, _ in continuation.resume(returning: data) }
+        }
+        #expect(String(decoding: first ?? Data(), as: UTF8.self).hasPrefix("HTTP/1.1 200"))
+        client.cancel()
+
+        for _ in 0..<20 where Stub.stopped == 0 { try await Task.sleep(for: .milliseconds(50)) }
+        #expect(Stub.stopped == 1)
+        #expect(Stub.chunksSent < 20)
     }
 
     @Test func answersHeadWithoutABody() async throws {
