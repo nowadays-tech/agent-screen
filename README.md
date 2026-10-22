@@ -59,7 +59,7 @@ Measured from Denmark on 2026-10-22, median of ten calls each:
 | 20,000 characters | 9,200 | 0.64 s |
 | 60,000 characters (one chunk) | 27,000 | 1.21 s |
 
-The first call after a pause takes about 0.9 s more, for the TLS connection and key lookup.
+The first call on a new connection takes about 0.9 s, because it adds the TLS handshake and a slower key lookup.
 
 ## Develop
 
