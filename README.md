@@ -20,7 +20,7 @@ ANTHROPIC_BASE_URL=http://127.0.0.1:8977 claude
 
 For a Multica agent, add `ANTHROPIC_BASE_URL` to its custom env with `multica agent env set`. The subscription login works through the proxy, so no API key is needed.
 
-Then pick **Set Superagent API Key…** in the menu. Without a key, the app passes traffic through and scores nothing. The key is stored in `~/Library/Application Support/Agent Screen/superagent-api-key` with mode 0600.
+Then pick **Superagent API Key…** in the menu and paste the key. Without a key, the app passes traffic through and scores nothing. The key is stored in `~/Library/Application Support/Agent Screen/superagent-api-key` with mode 0600.
 
 Pick **Open at Login** so the app comes back after a restart. An agent pointed at the URL fails while the app is not running.
 
@@ -38,13 +38,28 @@ Claude Code resends the whole conversation every turn. The app scores each resul
 
 ## Flags
 
-A flag turns the menu bar icon into a warning shield with a count. The menu lists the latest ten flags. Each flag is one JSON line in `~/Library/Application Support/Agent Screen/flags.jsonl`:
+A flag turns the menu bar icon into a red warning shield with a count. Opening the menu clears the count. The menu lists the latest eight flags. Each flag is one JSON line in `~/Library/Application Support/Agent Screen/flags.jsonl`:
 
 ```json
 {"excerpt":"…first 500 characters…","score":0.95,"session":"<Claude Code session id>","source":"https://example.com/page","time":"2026-10-22T13:08:18Z","tool":"WebFetch"}
 ```
 
 The app never logs headers. The agent's OAuth token passes through it, so it listens on `127.0.0.1` only.
+
+## Speed
+
+Screening runs beside the request, so an agent never waits for it. The proxy hop adds about 14 ms per request. The status line in the menu shows how long the last Security-One check took.
+
+Measured from Denmark on 2026-10-22, median of ten calls each:
+
+| Text sent | Tokens | Round trip |
+| --- | --- | --- |
+| 200 characters | 350 | 0.43 s |
+| 4,000 characters | 2,000 | 0.45 s |
+| 20,000 characters | 9,200 | 0.64 s |
+| 60,000 characters (one chunk) | 27,000 | 1.21 s |
+
+The first call after a pause takes about 0.9 s more, for the TLS connection and key lookup.
 
 ## Develop
 

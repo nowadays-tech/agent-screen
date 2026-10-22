@@ -288,16 +288,17 @@ struct AgentScreenCoreTests {
         superagent(status: 503)
         let log = tempLog()
         let screener = screener(log)
-        nonisolated(unsafe) var status: String?
-        screener.onStatus = { status = $0 }
+        nonisolated(unsafe) var check: Screener.Check?
+        screener.onCheck = { check = $0 }
 
         await screener.screen(messagesRequest)
-        #expect(status == "Security-One returned 503")
+        #expect(check == .failed("Security-One returned 503"))
         #expect(log.recent(10).isEmpty)
 
         superagent()
         await screener.screen(messagesRequest)
-        #expect(status == nil)
+        guard case .scored(let seconds) = check else { Issue.record("expected a score, got \(String(describing: check))"); return }
+        #expect(seconds >= 0)
         #expect(log.recent(10).count == 1)
     }
 
